@@ -112,6 +112,7 @@ let pif_configuration_error = "PIF_CONFIGURATION_ERROR"
 let pif_is_management_iface = "PIF_IS_MANAGEMENT_INTERFACE"
 let pif_incompatible_primary_address_type = "PIF_INCOMPATIBLE_PRIMARY_ADDRESS_TYPE"
 let required_pif_is_unplugged = "REQUIRED_PIF_IS_UNPLUGGED"
+let pif_not_present = "PIF_NOT_PRESENT"
 let pif_does_not_allow_unplug = "PIF_DOES_NOT_ALLOW_UNPLUG"
 let pif_unmanaged = "PIF_UNMANAGED"
 let cannot_plug_bond_slave = "CANNOT_PLUG_BOND_SLAVE"
@@ -306,6 +307,10 @@ let pool_joining_host_must_have_physical_management_nic = "POOL_JOINING_HOST_MUS
 let pool_joining_external_auth_mismatch = "POOL_JOINING_EXTERNAL_AUTH_MISMATCH"
 let pool_joining_host_must_have_same_product_version = "POOL_JOINING_HOST_MUST_HAVE_SAME_PRODUCT_VERSION"
 let pool_joining_host_must_only_have_physical_pifs = "POOL_JOINING_HOST_MUST_ONLY_HAVE_PHYSICAL_PIFS"
+let pool_joining_host_management_vlan_does_not_match = "POOL_JOINING_HOST_MANAGEMENT_VLAN_DOES_NOT_MATCH"
+let pool_joining_host_has_non_management_vlans = "POOL_JOINING_HOST_HAS_NON_MANAGEMENT_VLANS"
+let pool_joining_host_has_bonds = "POOL_JOINING_HOST_HAS_BONDS"
+let pool_joining_host_has_tunnels = "POOL_JOINING_HOST_HAS_TUNNELS"
 
 (*workload balancing*)
 let wlb_not_initialized = "WLB_NOT_INITIALIZED"

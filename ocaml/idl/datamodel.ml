@@ -568,15 +568,17 @@ let _ =
     ~doc:"The specified IP address violates the VIF locking configuration." ();
   error Api_errors.pif_is_management_iface [ "PIF" ]
     ~doc:"The operation you requested cannot be performed because the specified PIF is the management interface." ();
+  error Api_errors.pif_not_present ["host"; "network"]
+    ~doc:"This host has no PIF on the given network." ();
   error Api_errors.pif_does_not_allow_unplug [ "PIF" ]
     ~doc:"The operation you requested cannot be performed because the specified PIF does not allow unplug." ();
   error Api_errors.pif_unmanaged [ "PIF" ]
     ~doc:"The operation you requested cannot be performed because the specified PIF is not managed by xapi." ();
-  error Api_errors.pif_has_no_network_configuration [ ]
+  error Api_errors.pif_has_no_network_configuration [ "PIF" ]
     ~doc:"PIF has no IP configuration (mode currently set to 'none')" ();
-  error Api_errors.pif_has_no_v6_network_configuration [ ]
+  error Api_errors.pif_has_no_v6_network_configuration [ "PIF" ]
     ~doc:"PIF has no IPv6 configuration (mode currently set to 'none')" ();
-  error Api_errors.pif_incompatible_primary_address_type [ ]
+  error Api_errors.pif_incompatible_primary_address_type [ "PIF" ]
     ~doc:"The primary address types are not compatible" ();
   error Api_errors.cannot_plug_bond_slave ["PIF"]
     ~doc:"This PIF is a bond slave and cannot be plugged." ();
@@ -857,6 +859,14 @@ let _ =
     ~doc:"The host joining the pool must have the same product version as the pool master." ();
   error Api_errors.pool_joining_host_must_only_have_physical_pifs []
     ~doc:"The host joining the pool must not have any bonds, VLANs or tunnels." ();
+  error Api_errors.pool_joining_host_management_vlan_does_not_match ["local"; "remote"]
+    ~doc:"The host joining the pool must have the same management vlan." ();
+  error Api_errors.pool_joining_host_has_non_management_vlans []
+    ~doc:"The host joining the pool must not have any non-management vlans." ();
+  error Api_errors.pool_joining_host_has_bonds []
+    ~doc:"The host joining the pool must not have any bonds." ();
+  error Api_errors.pool_joining_host_has_tunnels []
+    ~doc:"The host joining the pool must not have any tunnels." ();
   error Api_errors.pool_hosts_not_compatible []
     ~doc:"The hosts in this pool are not compatible." ();
   error Api_errors.pool_hosts_not_homogeneous [ "reason" ]
@@ -6735,6 +6745,23 @@ let pool_create_VLAN = call
     ~allowed_roles:_R_POOL_OP
     ()
 
+let pool_management_reconfigure = call
+    ~name:"management_reconfigure"
+    ~in_oss_since:None
+    ~in_product_since:rel_falcon
+    ~params:[
+             Ref _network, "network", "The network";
+    ]
+    ~doc:"Reconfigure the management network interface for all Hosts in the Pool"
+    ~errs:[ Api_errors.ha_is_enabled;
+            Api_errors.pif_not_present;
+            Api_errors.cannot_plug_bond_slave;
+            Api_errors.pif_incompatible_primary_address_type;
+            Api_errors.pif_has_no_network_configuration;
+            Api_errors.pif_has_no_v6_network_configuration
+          ]
+    ~allowed_roles:_R_POOL_OP
+    ()
 
 let hello_return = Enum("hello_return", [
     "ok", "";
@@ -7207,6 +7234,7 @@ let pool =
       ; pool_hello
       ; pool_ping_slave
       ; pool_create_VLAN
+      ; pool_management_reconfigure
       ; pool_create_VLAN_from_PIF
       ; pool_slave_network_report
       ; pool_enable_ha
