@@ -47,14 +47,18 @@ import gc
 import signal
 import commands
 
+syslog.syslog(syslog.LOG_ERR, "PERFMON: Code got entered")
+
 def print_debug(string):
     if debug: 
         print >>sys.stderr, "DEBUG:", string
-        syslog.syslog(syslog.LOG_USER | syslog.LOG_INFO, "PERFMON(DEBUG): %s" % string)
+        #syslog.syslog(syslog.LOG_USER | syslog.LOG_INFO, "PERFMON(DEBUG): %s" % string)
+        syslog.syslog(syslog.LOG_ERR, "PERFMON: %s" % string)
 
 def log_err(string):
     print >>sys.stderr, string
-    syslog.syslog(syslog.LOG_USER | syslog.LOG_ERR, "PERFMON: %s" % string)
+    #syslog.syslog(syslog.LOG_USER | syslog.LOG_ERR, "PERFMON: %s" % string)
+    syslog.syslog(syslog.LOG_ERR, "PERFMON: %s" % string)
     pass
 
 def log_info(string):
@@ -406,6 +410,17 @@ def get_percent_sr_usage(mylist):
         log_err("Error %s in get_percent_sr_usage, return 0.0 instead" % e)
         return 0.0
 
+def get_percent_sr_usage(mylist):
+    """Get the percent usage of the SR. Input list should be exactly two items: [physical_utilisation, size]"""
+    try:
+        if len(mylist) != 2:
+            raise Exception("Incorrect number of values to consolidate: %d (exactly 2 values)" % len(mylist))
+        physical_utilisation, size = mylist[0:2]
+        return float(physical_utilisation) / size
+    except Exception, e:
+        log_err("Error %s in get_percent_sr_usage, return 0.0 instead" % e)
+        return 0.0
+
 class VariableConfig:
     """Object storing the configuration of a Variable
     
@@ -419,6 +434,17 @@ class VariableConfig:
                       by variable name
     """
     def __init__(self, xmldoc, alarm_create_callback, get_default_variable_config):
+        if XAPIDB_SR_PARAM:
+           self.alarm_trigger_level = SR_ALARM_TRIGGER_LEVEL 
+           self.alarm_trigger_period = SR_ALARM_TRIGGER_PERIOD
+           self.alarm_auto_inhibit_period = SR_ALARM_AUTO_INHIBIT_PERIOD
+           self.alarm_priority = SR_ALARM_PRIORITY
+           self.alarm_trigger_sense = "high" 
+           self.name = 'physical_utilisation'
+           trigger_level = float(self.alarm_trigger_level)
+           self.test_level = lambda : (self.value > trigger_level)
+           self.alarm_create_callback = alarm_create_callback
+           return
         try: name = xmldoc.getElementsByTagName('name')[0].getAttribute('value')
         except IndexError: raise XmlConfigException, "variable missing 'name' tag"
         def get_value(tag): 
@@ -483,6 +509,7 @@ class VariableState:
     def __init__(self):
         self.value = None
         self.timeof_last_alarm = time.time() - self.alarm_auto_inhibit_period
+        print_debug("VariableState: time.time(): %lu, self.alarm_auto_inhibit_period: %lu" % (time.time(), self.alarm_auto_inhibit_period))
         self.trigger_down_counter = self.alarm_trigger_period
 
 class Variable(VariableConfig, VariableState):
@@ -515,7 +542,10 @@ class Variable(VariableConfig, VariableState):
         if delta < self.alarm_auto_inhibit_period:
             return # we are in the auto inhibit period - do nothing
         self.timeof_last_alarm = t
-        message = "value: %f\nconfig:\n%s" % (self.value, self.xmldoc.toprettyxml())
+        if self.name == "physical_utilisation":
+            message = "Soon SR may run out of space"
+        else:
+            message = "value: %f\nconfig:\n%s" % (self.value, self.xmldoc.toprettyxml())
         
         self.alarm_create_callback(self, session, message)
 
@@ -530,13 +560,18 @@ class Variable(VariableConfig, VariableState):
         if self.test_level():
             # level is bad
             self.trigger_down_counter -= rrd_step
+            print_debug("self.trigger_down_counter: %d and rrd_step: %d" % (self.trigger_down_counter, rrd_step))
             if self.trigger_down_counter <= 0:
                 self.__generate_alarm(session)
                 # reset trigger counter
                 self.trigger_down_counter = self.alarm_trigger_period
+                if XAPIDB_SR_PARAM: 
+                   self.alarm_auto_inhibit_period = (interval*100)
         else:
             # level good - reset trigger counter
             self.trigger_down_counter = self.alarm_trigger_period
+            if XAPIDB_SR_PARAM:
+               self.alarm_auto_inhibit_period = SR_ALARM_AUTO_INHIBIT_PERIOD 
         
 
 class ObjectMonitor:
@@ -553,6 +588,9 @@ class ObjectMonitor:
         self.refresh_config()
         
     def refresh_config(self):
+        if (self.monitortype == "SR"):
+            self.update_sr_variables()
+            return True
         if self.__update_xmlconfig():
             # config has changed - reparse it
             try:
@@ -628,6 +666,68 @@ class ObjectMonitor:
     def get_active_variables(self):
         return self.variables
 
+    def is_SR_attached(self, sr_ref, session):
+        print_debug("is_SR_attached: Entered")
+        PBDs = session.xenapi.SR.get_PBDs(sr_ref)
+        for pbd in PBDs:
+	    if (session.xenapi.PBD.get_currently_attached(pbd) == True):
+                print_debug("is_SR_attached: True")
+	        return True
+        return False 
+
+    def update_sr_variables(self):
+        vn = "physical_utilisation"
+        var = Variable(vn, self.alarm_create, self.get_default_variable_config)
+        print_debug("Appending %s to list of variables for %s UUID=%s" % (var.name, self.monitortype, self.uuid))
+        print_debug("var name is %s" % var.name)
+        self.variables.append(var)
+
+
+    def is_sr_master(self, sr_ref, session, host_uuid):
+        print_debug("is_SR_master: Entered")
+        try:
+           if session.xenapi.SR.get_shared(sr_ref):
+              pools = session.xenapi.pool.get_all()
+              print_debug("host_uuis : %s" % host_uuid)
+              host_ref = session.xenapi.host.get_by_uuid(host_uuid)
+              print_debug("host_ref : %s" % host_ref)
+              if (host_ref == session.xenapi.pool.get_master(pools[0])):
+                  print_debug("is_SR_master: True")
+                  return True
+           else:
+               pbds = session.xenapi.SR.get_PBDs(sr_ref)
+               count = 0
+               for pbd in pbds:
+                   count = count+1
+               if (count == 1):
+                   print_debug("is_SR_master: True")
+                   return True
+               else:
+                   print_debug("is_SR_master: False")
+                   return False
+        except:
+            pass 
+
+    def process_xapidb_updates(self, session, host_uuid):
+        print_debug("%sMonitor processing xapi_updates for %s" % (self.monitortype, self.uuid))
+        try:
+           for var in self.get_active_variables():
+               print_debug("var is %s" % var.name)
+               stats = {}
+               # find the subset of the params returned for this object that we need to consolidate into var
+               sr_ref = session.xenapi.SR.get_by_uuid(self.uuid)
+               if (self.is_SR_attached(sr_ref, session) and self.is_sr_master(sr_ref, session, host_uuid)):
+                   now = time.time()
+                   stats['physical_utilisation'] = int(session.xenapi.SR.get_physical_utilisation(sr_ref))
+                   stats['physical_size'] = int(session.xenapi.SR.get_physical_size(sr_ref))
+                   print_debug("physical_util %s" % stats)
+                   value = (stats['physical_utilisation'] * 100)/stats['physical_size'] 
+                   print_debug("util_percent  is  %d" % value)
+                   var.update(value, session)
+        except Exception, inst:
+               print_debug("process_xapidb_updates for SR failed with  %s" % inst)
+               pass
+
     def process_rrd_updates(self, rrd_updates, session):
         print_debug("%sMonitor processing rrd_updates for %s" % (self.monitortype, self.uuid))
         obj_report = rrd_updates.get_obj_report_by_uuid(self.uuid)
@@ -650,7 +750,10 @@ class ObjectMonitor:
     def alarm_create(self, var, session, message):
         "Callback used by Variable var to actually send an alarm"
         print_debug("Creating an alarm for %s %s, message: %s" % (self.monitortype, self.uuid, message))
-        session.xenapi.message.create("ALARM", var.alarm_priority, self.monitortype, self.uuid, message)
+        if (self.monitortype == "SR"):
+            session.xenapi.message.create("The SR utilization crossed 80 percent", var.alarm_priority, self.monitortype, self.uuid, message)
+        else:
+            session.xenapi.message.create("ALARM", var.alarm_priority, self.monitortype, self.uuid, message)
             
 class VMMonitor(ObjectMonitor):
     """Object that maintains state of one VM
@@ -730,14 +833,19 @@ class SRMonitor(ObjectMonitor):
         self.monitortype = "SR"
         ObjectMonitor.__init__(self, *args)
         print_debug("Created SRMonitor with uuid %s" % self.uuid)
+        log_err("Created SRMonitor with uuid %s" % self.uuid)
 
     def get_default_variable_config(self, variable_name, config_tag):
+        #Here as RRD doesnt contain the physical size and physical utilization of SR, using XAPI DB to read from
+        sr_ref = session.SR.get_by_uuid(self.uuid)
         "This allows user to not specify full set of tags for each variable in xml config"
+        print_debug("Created SRMonitor get_default_variable_config is called")
         if config_tag == 'consolidation_fn':
-            if variable_name == 'physical_utilisation': return 'get_percent_sr_usage'
+            if variable_name == 'physical_utilisation': return session.SR.get_physical_utilisation(sr_ref)
             else: return 'sum'
         elif config_tag == 'rrd_regex':
-            if variable_name == 'physical_utilisation': return 'physical_utilisation|size'
+            utilization = session.SR.get_physical_utilisation(sr_ref)/session.SR.get_physical_size(sr_ref)
+            if variable_name == 'physical_utilisation': return utilization
             elif variable_name == "sr_io_throughput_total_per_host": return '_$_DUMMY__' # (these are to drive Host RRDs and so are handled by the HOSTMonitor)
             else: raise XmlConfigException, "variable %s: no default rrd_regex - please specify one" % variable_name
         elif config_tag == 'alarm_trigger_period':      return '60'   # 1 minute
@@ -785,6 +893,7 @@ class HOSTMonitor(ObjectMonitor):
         self.secondary_xmlconfigs = {} # map of sr uuid to xml text
         ObjectMonitor.__init__(self, *args)
         print_debug("Created HOSTMonitor with uuid %s" % self.uuid)
+        log_err("Created HOSTMonitor with uuid %s" % self.uuid)
 
     def get_default_variable_config(self, variable_name, config_tag):
         "This allows user to not specify full set of tags for each variable in xml config"
@@ -962,11 +1071,24 @@ def update_all_xmlconfigs(session):
                 else:
                     sruuids_by_hostuuid[hu] = set([sruuid])
 
+
+def is_sr_type_supported(sr_type):
+    if((sr_type == "nfs") or (sr_type == "smb") or ("lvm" in sr_type)):
+       return True
+    else:
+       return False
+
 # 5 minute default interval
-interval = 300
+interval = 60
 interval_percent_dither = 5
 rrd_step = 60
-debug = False
+debug = True
+XAPIDB_SR_PARAM = True
+if XAPIDB_SR_PARAM:
+   SR_ALARM_TRIGGER_LEVEL = 80
+   SR_ALARM_TRIGGER_PERIOD = 60
+   SR_ALARM_AUTO_INHIBIT_PERIOD = 20
+   SR_ALARM_PRIORITY = 1
 
 # rate to call update_all_xmlconfigs()
 config_update_period = 1800
@@ -987,7 +1109,7 @@ def main():
             ["interval=", "numloops=","debug","rrdstep=","config_update_period=","interval_percent_dither="])
     except getopt.GetoptError:
         raise UsageException
-    
+    print_debug("Entered main()") 
     configfname = None
     for opt, arg in opts:
         if opt == '-i' or opt == '--interval':
@@ -1036,12 +1158,17 @@ def main():
     # This dictionary uses uuids to lookup each monitor object
     sr_mon_lookup = {}
 
+    # stores the  srs uuids of this host
+    # This dictionary always refreshed the uuids on each perfmon run
+    sr_uuids = {}
+
     # The monitor for the host
     host_mon = None
     
     runs = 0
     while True:
         print_debug("Run: %d" % runs)
+        print_debug("At entry of while sr_mon_lookup: %s" % sr_mon_lookup)
 
         # Get new updates - and catch any http errors
         try:
@@ -1062,25 +1189,26 @@ def main():
                 next_config_update = time.time() + config_update_period
 
             # List of VMs present in rrd_updates
-            vm_uuid_list = rrd_updates.get_uuid_list_by_objtype('vm')
+            #vm_uuid_list = rrd_updates.get_uuid_list_by_objtype('vm')
 
             # Remove any monitors for VMs no longer listed in rrd_updates page
-            for uuid in vm_mon_lookup.keys():
-                if uuid not in vm_uuid_list:
-                    vm_mon_lookup.pop(uuid)
+            #for uuid in vm_mon_lookup.keys():
+                #if uuid not in vm_uuid_list:
+                    #vm_mon_lookup.pop(uuid)
                 
             # Create monitors for VMs that have just appeared in rrd_updates page
-            for uuid in vm_uuid_list:
-                if uuid not in vm_mon_lookup.keys():
-                    vm_mon_lookup[uuid] = VMMonitor(uuid)
-                else:
+            #for uuid in vm_uuid_list:
+                #if uuid not in vm_mon_lookup.keys():
+                    #vm_mon_lookup[uuid] = VMMonitor(uuid)
+                #else:
                     # check if the config has changed, e.g. by XenCenter
-                    vm_mon_lookup[uuid].refresh_config()
+                    #vm_mon_lookup[uuid].refresh_config()
             
             # Remove monitor for the host if it's no longer listed in rrd_updates page
             # Create monitor for the host if it has just appeared in rrd_updates page
             try:
                 host_uuid = rrd_updates.get_uuid_list_by_objtype('host')[0] # should only ever be one of these
+                print_debug("host_uuid is : %s" % host_uuid)
             except:
                 # list may be empty!
                 host_uuid = None
@@ -1095,21 +1223,44 @@ def main():
             else:
                 # check if the config has changed, e.g. by XenCenter
                 host_mon.refresh_config()
+            if not XAPIDB_SR_PARAM:
+               # List of SRs present in rrd_updates
+               sr_uuid_list = rrd_updates.get_uuid_list_by_objtype('sr')
+               print_debug("sr_uuid_list = %s" % sr_uuid_list)
 
-            # List of SRs present in rrd_updates
-            sr_uuid_list = rrd_updates.get_uuid_list_by_objtype('sr')
-            print_debug("sr_uuid_list = %s" % sr_uuid_list)
-
-            # Remove monitors for SRs no longer listed in the rrd_updates page
-            for uuid in sr_mon_lookup.keys():
-                if uuid not in sr_uuid_list:
-                    sr_mon_lookup.pop(uuid)
+               # Remove monitors for SRs no longer listed in the rrd_updates page
+               for uuid in sr_mon_lookup.keys():
+                   if uuid not in sr_uuid_list:
+                      sr_mon_lookup.pop(uuid)
+            else:
+                for uuid in sr_uuids.keys():
+                    sr_uuids[uuid] = 0
+ 
             # Create monitors for SRs that have just appeared in rrd_updates page
-            for uuid in sr_uuid_list:
-                if uuid not in sr_mon_lookup.keys():
-                    sr_mon_lookup[uuid] = SRMonitor(uuid)
-                else:
-                    sr_mon_lookup[uuid].refresh_config()
+            if XAPIDB_SR_PARAM:
+               SRs = session.xenapi.SR.get_all_records()
+               for sr in SRs:
+                   record = SRs[sr]
+                   #print_debug("sr_record %s" % record)
+                   if (record.has_key('uuid') and is_sr_type_supported(record['type'])):
+                      uuid = record['uuid']
+                      sr_uuids[uuid] = 1
+                      if uuid not in sr_mon_lookup.keys():
+                         print_debug("sr_uuid is not in sr_mon_lookup")
+                         sr_mon_lookup[uuid] = SRMonitor(uuid)
+                      #else:
+                          #print_debug("sr_uuid is in sr_mon_lookup")
+                          #sr_mon_lookup[uuid].refresh_config()
+               for uuid in sr_mon_lookup.keys():
+                   if sr_uuids[uuid] == 0:
+                      sr_mon_lookup.pop(uuid)
+            else:
+                for uuid in sr_uuid_list:
+                    if uuid not in sr_mon_lookup.keys():
+                       sr_mon_lookup[uuid] = SRMonitor(uuid)
+                    else:
+                       sr_mon_lookup[uuid].refresh_config()
+            print_debug("sr_mon_lookup: %s" % sr_mon_lookup)
 
             # Go through each vm_mon and update it using the rrd_udpates - this may generate alarms
             for vm_mon in vm_mon_lookup.values():
@@ -1121,7 +1272,11 @@ def main():
 
             # And for the sr_mons
             for sr_mon in sr_mon_lookup.values():
-                sr_mon.process_rrd_updates(rrd_updates, session)
+                if XAPIDB_SR_PARAM:
+                   host_uuid = rrd_updates.get_uuid_list_by_objtype('host')[0] # should only ever be one of these
+                   sr_mon.process_xapidb_updates(session, host_uuid)
+                else:
+                    sr_mon.process_rrd_updates(rrd_updates, session)
 
         except socket.error, e:
             if e.args[0] == 111:
@@ -1157,6 +1312,7 @@ def main():
         # Sleep for interval + dither, exiting early if we recv a cmd
         timeout = rand(interval, interval + dither)
         cmdsock.settimeout(timeout)
+        print_debug("The timeout for cmdsock_recv is %d" % timeout)
         try:
             cmd = cmdsock.recv(cmdmaxlen)
         except socket.timeout:
@@ -1170,6 +1326,7 @@ def main():
             else:
                 log_err("received unhandled command %s" % cmd)
 
+        print_debug("Continuing for next run")
         # continue to next run
 
     return 0
